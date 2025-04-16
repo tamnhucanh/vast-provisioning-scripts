@@ -10,6 +10,22 @@ if [ -z "$CIVITAI_TOKEN" ]; then
   exit 1
 fi
 
+# Validate token by making a test API call
+echo "Validating CivitAI API token..."
+test_response=$(curl -s -m 10 -w "%{http_code}" -H "Authorization: Bearer $CIVITAI_TOKEN" \
+  "https://civitai.com/api/v1/models?limit=1" || echo "CURL_FAILED")
+test_status=${test_response: -3}
+test_body=${test_response:0:${#test_response}-3}
+
+if [[ "$test_response" == "CURL_FAILED" ]]; then
+  echo "ERROR: Failed to connect to CivitAI API for token validation."
+  exit 1
+elif [[ $test_status != "200" ]]; then
+  echo "ERROR: Invalid CivitAI token (HTTP $test_status). Response: $test_body"
+  exit 1
+fi
+echo "CivitAI API token validated successfully."
+
 # Validate dependencies
 for cmd in curl jq git xargs; do
   if ! command -v "$cmd" &> /dev/null; then
@@ -42,6 +58,8 @@ download_civit_model() {
   local model_version_id=$1
   local target_dir=$2
   local attempt=1
+
+  echo "Processing model $model_version_id to $target_dir"
 
   # Create target directory
   mkdir -p "$target_dir" || {
@@ -169,6 +187,8 @@ download_model_wrapper() {
   local target_dir
   local model_id
 
+  echo "Starting download wrapper for $id"
+
   # Determine if it's a model or LoRA based on prefix
   if [[ "${id:0:1}" == "m" ]]; then
     target_dir="$MODEL_DIR"
@@ -184,14 +204,22 @@ download_model_wrapper() {
 }
 
 export -f download_civit_model download_model_wrapper sanitize
-export CIVITAI_TOKEN MODEL_DIR LORA_DIR MAX_RETRIES RETRY_DELAY CURL_TIMEOUT DOWNLOAD_STATUS
+export CIVITAI_TOKEN MODEL_DIR LORA_DIR MAX_RETRIES RETRY_DELAY CURL_TIMEOUT
 
 # Function to download multiple models in parallel using xargs
 download_batch() {
   local ids=("$@")
 
-  echo "Starting parallel download of ${#ids[@]} models/LoRAs..."
-  printf "%s\n" "${ids[@]}" | xargs -n 1 -P "$MAX_PARALLEL" -I {} bash -c 'download_model_wrapper "{}"'
+  echo "Starting download_batch with ${#ids[@]} models/LoRAs: ${ids[*]}"
+
+  # Try parallel download with xargs
+  printf "%s\n" "${ids[@]}" | xargs -n 1 -P "$MAX_PARALLEL" -I {} bash -c 'download_model_wrapper "{}"' || {
+    echo "WARNING: Parallel download failed, falling back to sequential download..."
+    # Fallback to sequential download
+    for id in "${ids[@]}"; do
+      download_model_wrapper "$id"
+    done
+  }
 
   # Print summary of download outcomes
   echo "=== Download Summary ==="
@@ -228,8 +256,8 @@ install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-bro
 # Install custom extensions
 install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git"
 install_extension "https://github.com/adieyal/sd-dynamic-prompts.git"
-install_extension "https://github.com/Bing-su/adetailer.git"
 install_extension "https://github.com/BlafKing/sd-civitai-browser-plus.git"
+install_extension "https://github.com/Bing-su/adetailer.git"
 
 # ControlNet models setup
 mkdir -p "$FORGE_PATH/extensions/sd-webui-controlnet/models"
@@ -243,4 +271,9 @@ cd "$FORGE_PATH/models/VAE"
 wget -nc https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors
 
 # Download models and LoRAs with parallel processing (prefix m=model, l=lora)
-echo "=== Downloading models and LoRAs in parallel (max $MAX_PARALLEL) ==="
+echo "=== Downloading models and LoRAs ==="
+download_batch \
+  "m1166878" "m1612720" "m1111838" \
+  "l1568786" "l1074877" "l1486082" "l1360425" "l1470544" "l1645427" "l999582" "l1364444" "l1458421"
+
+echo "Provisioning completed successfully! Check $MODEL_DIR and $LORA_DIR"
