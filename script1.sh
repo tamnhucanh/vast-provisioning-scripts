@@ -35,7 +35,7 @@ for cmd in curl jq git; do
 done
 
 # Check disk space
-MIN_DISK_SPACE=$((50 * 1024 * 1024)) # 50GB in KB
+MIN_DISK_SPACE=$((30 * 1024 * 1024)) # 30GB in KB
 AVAILABLE_DISK=$(df -k /workspace | tail -1 | awk '{print $4}')
 if [ "$AVAILABLE_DISK" -lt "$MIN_DISK_SPACE" ]; then
   echo "ERROR: Insufficient disk space. Available: $AVAILABLE_DISK KB, Required: $MIN_DISK_SPACE KB"
