@@ -1,73 +1,85 @@
 #!/bin/bash
 
 # Set CivitAI API token from environment variable (set in Vast.ai template)
-# Do NOT hardcode your token here; set it in the Vast.ai template as CIVITAI_TOKEN=your_actual_token
+# NEVER hardcode your token here - set it via Vast.ai's environment variables
 export CIVITAI_TOKEN="${CIVITAI_TOKEN}"
 
-# Install extensions (original + your custom)
-cd /workspace/stable-diffusion-webui/extensions
+# Validate token presence early
+if [ -z "$CIVITAI_TOKEN" ]; then
+  echo "ERROR: CivitAI token not found! Set CIVITAI_TOKEN in Vast.ai template."
+  exit 1
+fi
+
+# Base path for Forge
+FORGE_PATH="/workspace/stable-diffusion-webui-forge"
+
+# Install extensions with git clone robustness
+install_extension() {
+  repo_url=$1
+  repo_name=$(basename "$repo_url" .git)
+  if [ ! -d "$FORGE_PATH/extensions/$repo_name" ]; then
+    git clone "$repo_url" "$FORGE_PATH/extensions/$repo_name" || echo "Warning: Failed to clone $repo_name"
+  fi
+}
 
 # Original extensions
-git clone https://github.com/Mikubill/sd-webui-controlnet.git || true
-git clone https://github.com/camenduru/sd-webui-additional-networks.git || true
-git clone https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git || true
+install_extension "https://github.com/Mikubill/sd-webui-controlnet.git"
+install_extension "https://github.com/camenduru/sd-webui-additional-networks.git"
+install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git"
 
-# Your custom extensions
-git clone https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git || true
-git clone https://github.com/adieyal/sd-dynamic-prompts.git || true
-git clone https://github.com/Bing-su/adetailer.git || true
-git clone https://github.com/BlafKing/sd-civitai-browser-plus.git || true
+# Custom extensions
+install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git"
+install_extension "https://github.com/adieyal/sd-dynamic-prompts.git"
+install_extension "https://github.com/Bing-su/adetailer.git"
+install_extension "https://github.com/BlafKing/sd-civitai-browser-plus.git"
 
-# Install ControlNet models (from original script)
-cd /workspace/stable-diffusion-webui/extensions/sd-webui-controlnet/models
+# ControlNet models
+mkdir -p "$FORGE_PATH/extensions/sd-webui-controlnet/models"
+cd "$FORGE_PATH/extensions/sd-webui-controlnet/models"
 wget -nc https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_canny.pth
 wget -nc https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.pth
 
-# Install VAE (from original script)
-cd /workspace/stable-diffusion-webui/models/VAE
+# VAE installation
+mkdir -p "$FORGE_PATH/models/VAE"
+cd "$FORGE_PATH/models/VAE"
 wget -nc https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors
 
-# Install your specified base models
-cd /workspace/stable-diffusion-webui/models/Stable-diffusion
+# Base models installation
+mkdir -p "$FORGE_PATH/models/Stable-diffusion"
+cd "$FORGE_PATH/models/Stable-diffusion"
+download_model() {
+  model_id=$1
+  output_name=$2
+  echo "Downloading model: $output_name"
+  curl -H "Authorization: Bearer $CIVITAI_TOKEN" \
+    -fL -o "$output_name" \
+    "https://civitai.com/api/download/models/$model_id" || echo "Error downloading model $model_id"
+}
 
-# Model 1: NTR MIX | illustrious-XL | Noob-XL (v1166878)
-wget -nc "https://civitai.com/api/download/models/1166878?token=$CIVITAI_TOKEN" -O ntr_mix_xiii.safetensors
+download_model 1166878 "ntr_mix_xiii.safetensors"
+download_model 1612720 "model_827184.safetensors"
+download_model 1111838 "model_992378.safetensors"
 
-# Model 2: (v1612720)
-wget -nc "https://civitai.com/api/download/models/1612720?token=$CIVITAI_TOKEN" -O model_827184.safetensors
+# LoRA installation
+mkdir -p "$FORGE_PATH/models/Lora"
+cd "$FORGE_PATH/models/Lora"
+download_lora() {
+  model_id=$1
+  output_name=$2
+  echo "Downloading LoRA: $output_name"
+  curl -H "Authorization: Bearer $CIVITAI_TOKEN" \
+    -fL -o "$output_name" \
+    "https://civitai.com/api/download/models/$model_id" || echo "Error downloading LoRA $model_id"
+}
 
-# Model 3: (v1111838)
-wget -nc "https://civitai.com/api/download/models/1111838?token=$CIVITAI_TOKEN" -O model_992378.safetensors
+download_lora 1568786 "lora_1033320_1568786.safetensors"
+download_lora 1074877 "lora_960071_1074877.safetensors"
+download_lora 1486082 "lora_1316436_1486082.safetensors"
+download_lora 1360425 "lora_1126830_1360425.safetensors"
+download_lora 1470544 "lora_1145743_1470544.safetensors"
+download_lora 1645427 "lora_971952_1645427.safetensors"
+download_lora 999582 "lora_893267_999582.safetensors"
+download_lora 1364444 "lora_1211374_1364444.safetensors"
+download_lora 1458421 "lora_1292332_1458421.safetensors"
 
-# Install LoRA models
-cd /workspace/stable-diffusion-webui/models/Lora
-
-# LoRA 1
-wget -nc "https://civitai.com/api/download/models/1568786?token=$CIVITAI_TOKEN" -O lora_1033320_1568786.safetensors
-
-# LoRA 2
-wget -nc "https://civitai.com/api/download/models/1074877?token=$CIVITAI_TOKEN" -O lora_960071_1074877.safetensors
-
-# LoRA 3
-wget -nc "https://civitai.com/api/download/models/1486082?token=$CIVITAI_TOKEN" -O lora_1316436_1486082.safetensors
-
-# LoRA 4
-wget -nc "https://civitai.com/api/download/models/1360425?token=$CIVITAI_TOKEN" -O lora_1126830_1360425.safetensors
-
-# LoRA 5
-wget -nc "https://civitai.com/api/download/models/1470544?token=$CIVITAI_TOKEN" -O lora_1145743_1470544.safetensors
-
-# LoRA 6
-wget -nc "https://civitai.com/api/download/models/1645427?token=$CIVITAI_TOKEN" -O lora_971952_1645427.safetensors
-
-# LoRA 7
-wget -nc "https://civitai.com/api/download/models/999582?token=$CIVITAI_TOKEN" -O lora_893267_999582.safetensors
-
-# LoRA 8
-wget -nc "https://civitai.com/api/download/models/1364444?token=$CIVITAI_TOKEN" -O lora_1211374_1364444.safetensors
-
-# LoRA 9
-wget -nc "https://civitai.com/api/download/models/1458421?token=$CIVITAI_TOKEN" -O lora_1292332_1458421.safetensors
-
-# (Optional) Install custom requirements
-# /workspace/venv/bin/pip install <package-name>
+echo "Provisioning script completed with status: $?"
