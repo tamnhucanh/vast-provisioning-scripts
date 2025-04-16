@@ -1,3 +1,4 @@
+```bash
 #!/bin/bash
 
 set -e
@@ -55,25 +56,39 @@ mkdir -p "$MODEL_DIR" "$LORA_DIR"
 mkdir -p "/workspace/stable-diffusion-webui-forge/models/ControlNet"
 mkdir -p "/workspace/stable-diffusion-webui-forge/models/VAE"
 
-# Install extensions
+# Install extensions with retry and non-fatal error handling
 install_extension() {
     local repo_url="$1"
     local dir_name="$2"
     local target_dir="/workspace/stable-diffusion-webui-forge/extensions/$dir_name"
+    local attempt=1
+    local max_attempts=3
     echo "Installing extension: $dir_name"
     if [ -d "$target_dir" ]; then
         echo "Extension $dir_name already exists, skipping clone."
-    else
-        git clone "$repo_url" "$target_dir" || {
-            echo "ERROR: Failed to clone $repo_url"
-            exit 1
-        }
+        return 0
     fi
+    while [ $attempt -le $max_attempts ]; do
+        echo "Attempt $attempt/$max_attempts to clone $repo_url"
+        if git clone "$repo_url" "$target_dir" 2>&1; then
+            echo "Successfully cloned $dir_name"
+            return 0
+        else
+            echo "WARNING: Failed to clone $repo_url (attempt $attempt/$max_attempts)"
+            if [ $attempt -eq $max_attempts ]; then
+                echo "ERROR: Failed to clone $dir_name after $max_attempts attempts, continuing..."
+                return 1
+            fi
+            sleep 5
+            attempt=$((attempt + 1))
+        fi
+    done
 }
 
+# List of extensions to install
 install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" "sd-webui-controlnet"
 install_extension "https://github.com/kohya-ss/sd-webui-additional-networks.git" "sd-webui-additional-networks"
-install_extension "https://github.com/AUTOMATIC1111/stable-diffusion-webui-images-browser.git" "stable-diffusion-webui-images-browser"
+install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" "stable-diffusion-webui-images-browser"
 install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git" "a1111-sd-webui-tagcomplete"
 install_extension "https://github.com/adieyal/sd-dynamic-prompts.git" "sd-dynamic-prompts"
 install_extension "https://github.com/civitai/sd_civitai_extension.git" "sd-civitai-browser-plus"
@@ -261,7 +276,7 @@ download_model_wrapper() {
 # Declare DOWNLOAD_STATUS as an associative array
 declare -A DOWNLOAD_STATUS
 
-# Download models and LoRAs in parallel
+# Download models and LoRAs in parallel with debug logging
 download_batch() {
     local ids=("$@")
     echo "Starting parallel download_batch with ${#ids[@]} models/LoRAs: ${ids[*]}"
@@ -270,8 +285,10 @@ download_batch() {
     export -f download_civit_model download_model_wrapper sanitize validate_model_id
     export CIVITAI_TOKEN MODEL_DIR LORA_DIR MAX_RETRIES RETRY_DELAY CURL_TIMEOUT
 
-    # Run downloads in parallel with xargs, max 3 at a time
-    printf "%s\n" "${ids[@]}" | xargs -n 1 -P 3 -I {} bash -c 'download_model_wrapper "{}"'
+    # Run downloads in parallel with xargs, max 3 at a time, with debug output
+    printf "%s\n" "${ids[@]}" | xargs -n 1 -P 3 -I {} bash -c 'download_model_wrapper "{}" 2>&1 | tee -a /var/log/portal/provisioning.log' || {
+        echo "ERROR: One or more parallel downloads failed, continuing to report status..."
+    }
 
     # Print summary of download outcomes
     echo "=== Download Summary ==="
@@ -299,3 +316,4 @@ download_batch \
 
 echo "Provisioning completed successfully! Check $MODEL_DIR and $LORA_DIR"
 exit 0
+```
