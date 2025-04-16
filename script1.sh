@@ -1,4 +1,3 @@
-```bash
 #!/bin/bash
 
 set -e
@@ -85,10 +84,9 @@ install_extension() {
     done
 }
 
-# List of extensions to install
+# List of extensions to install (removed stable-diffusion-webui-images-browser)
 install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" "sd-webui-controlnet"
 install_extension "https://github.com/kohya-ss/sd-webui-additional-networks.git" "sd-webui-additional-networks"
-install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" "stable-diffusion-webui-images-browser"
 install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git" "a1111-sd-webui-tagcomplete"
 install_extension "https://github.com/adieyal/sd-dynamic-prompts.git" "sd-dynamic-prompts"
 install_extension "https://github.com/civitai/sd_civitai_extension.git" "sd-civitai-browser-plus"
@@ -316,4 +314,3 @@ download_batch \
 
 echo "Provisioning completed successfully! Check $MODEL_DIR and $LORA_DIR"
 exit 0
-```
