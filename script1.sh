@@ -27,23 +27,32 @@ fi
 echo "CivitAI API token validated successfully."
 
 # Validate dependencies
-for cmd in curl jq git xargs; do
+for cmd in curl jq git; do
   if ! command -v "$cmd" &> /dev/null; then
     echo "ERROR: Required command '$cmd' not found. Please install it."
     exit 1
   fi
 done
 
+# Check disk space
+MIN_DISK_SPACE=$((50 * 1024 * 1024)) # 50GB in KB
+AVAILABLE_DISK=$(df -k /workspace | tail -1 | awk '{print $4}')
+if [ "$AVAILABLE_DISK" -lt "$MIN_DISK_SPACE" ]; then
+  echo "ERROR: Insufficient disk space. Available: $AVAILABLE_DISK KB, Required: $MIN_DISK_SPACE KB"
+  exit 1
+fi
+echo "Disk space check passed. Available: $AVAILABLE_DISK KB"
+
 # Base paths
 FORGE_PATH="/workspace/stable-diffusion-webui-forge"
 MODEL_DIR="$FORGE_PATH/models/Stable-diffusion"
 LORA_DIR="$FORGE_PATH/models/Lora"
 
-# Parallel download settings
-MAX_PARALLEL=2      # Reduced to avoid API rate limits
+# Download settings
 MAX_RETRIES=3       # Maximum retries for failed downloads
-RETRY_DELAY=5       # Delay between retries (seconds)
-CURL_TIMEOUT=30     # Timeout for curl commands (seconds)
+RETRY_DELAY=10      # Delay between retries (seconds)
+CURL_TIMEOUT=300    # Timeout for curl commands (seconds)
+DELAY_BETWEEN=5     # Delay between downloads to avoid rate limits
 
 # Array to track download outcomes
 declare -A DOWNLOAD_STATUS
@@ -51,6 +60,26 @@ declare -A DOWNLOAD_STATUS
 # Function to sanitize filenames
 sanitize() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-'
+}
+
+# Function to validate model ID
+validate_model_id() {
+  local model_id=$1
+  echo "Validating model ID $model_id..."
+  local response
+  response=$(curl -s -m 10 -w "%{http_code}" -H "Authorization: Bearer $CIVITAI_TOKEN" \
+    "https://civitai.com/api/v1/model-versions/$model_id" || echo "CURL_FAILED")
+  local status=${response: -3}
+
+  if [[ "$response" == "CURL_FAILED" ]]; then
+    echo "ERROR: Failed to connect to CivitAI API for model $model_id"
+    return 1
+  elif [[ $status != "200" ]]; then
+    echo "ERROR: Invalid model ID $model_id (HTTP $status)"
+    return 1
+  fi
+  echo "Model ID $model_id is valid"
+  return 0
 }
 
 # Function to download CivitAI assets with retry logic
@@ -86,7 +115,12 @@ download_civit_model() {
     api_status=${api_response: -3}
     local metadata=${api_response:0:${#api_response}-3}
 
-    if [[ $api_status != "200" ]]; then
+    if [[ $api_status == "429" ]]; then
+      echo "ERROR: Rate limit hit for model $model_version_id. Waiting 60 seconds..."
+      sleep 60
+      ((attempt++))
+      continue
+    elif [[ $api_status != "200" ]]; then
       echo "ERROR: Failed to get metadata for model $model_version_id (HTTP $api_status)"
       echo "API Response: $metadata"
       sleep $RETRY_DELAY
@@ -181,7 +215,7 @@ download_civit_model() {
   return 1
 }
 
-# Wrapper function for xargs
+# Wrapper function for downloads
 download_model_wrapper() {
   local id=$1
   local target_dir
@@ -198,28 +232,32 @@ download_model_wrapper() {
     model_id="${id:1}"
   fi
 
+  # Validate model ID
+  if ! validate_model_id "$model_id"; then
+    echo "Skipping invalid model ID $id"
+    DOWNLOAD_STATUS["$model_id"]="Failed (invalid ID)"
+    return 0 # Return 0 to prevent xargs from stopping
+  fi
+
   download_civit_model "$model_id" "$target_dir" && \
     echo "Completed download of $id" || \
     echo "Failed download of $id"
+  return 0 # Always return 0 to ensure xargs continues
 }
 
-export -f download_civit_model download_model_wrapper sanitize
+export -f download_civit_model download_model_wrapper sanitize validate_model_id
 export CIVITAI_TOKEN MODEL_DIR LORA_DIR MAX_RETRIES RETRY_DELAY CURL_TIMEOUT
 
-# Function to download multiple models in parallel using xargs
+# Function to download multiple models sequentially
 download_batch() {
   local ids=("$@")
 
   echo "Starting download_batch with ${#ids[@]} models/LoRAs: ${ids[*]}"
 
-  # Try parallel download with xargs
-  printf "%s\n" "${ids[@]}" | xargs -n 1 -P "$MAX_PARALLEL" -I {} bash -c 'download_model_wrapper "{}"' || {
-    echo "WARNING: Parallel download failed, falling back to sequential download..."
-    # Fallback to sequential download
-    for id in "${ids[@]}"; do
-      download_model_wrapper "$id"
-    done
-  }
+  for id in "${ids[@]}"; do
+    download_model_wrapper "$id"
+    sleep "$DELAY_BETWEEN" # Avoid rate limits
+  done
 
   # Print summary of download outcomes
   echo "=== Download Summary ==="
@@ -270,7 +308,7 @@ mkdir -p "$FORGE_PATH/models/VAE"
 cd "$FORGE_PATH/models/VAE"
 wget -nc https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors
 
-# Download models and LoRAs with parallel processing (prefix m=model, l=lora)
+# Download models and LoRAs
 echo "=== Downloading models and LoRAs ==="
 download_batch \
   "m1166878" "m1612720" "m1111838" \
