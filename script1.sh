@@ -11,7 +11,7 @@ if [ -z "$CIVITAI_TOKEN" ]; then
 fi
 
 # Validate dependencies
-for cmd in curl jq git; do
+for cmd in curl jq git xargs; do
   if ! command -v "$cmd" &> /dev/null; then
     echo "ERROR: Required command '$cmd' not found. Please install it."
     exit 1
@@ -24,9 +24,13 @@ MODEL_DIR="$FORGE_PATH/models/Stable-diffusion"
 LORA_DIR="$FORGE_PATH/models/Lora"
 
 # Parallel download settings
-MAX_PARALLEL=4      # Maximum number of concurrent downloads
+MAX_PARALLEL=2      # Reduced to avoid API rate limits
 MAX_RETRIES=3       # Maximum retries for failed downloads
 RETRY_DELAY=5       # Delay between retries (seconds)
+CURL_TIMEOUT=30     # Timeout for curl commands (seconds)
+
+# Array to track download outcomes
+declare -A DOWNLOAD_STATUS
 
 # Function to sanitize filenames
 sanitize() {
@@ -41,7 +45,7 @@ download_civit_model() {
 
   # Create target directory
   mkdir -p "$target_dir" || {
-    echo "ERROR: Failed to create directory $target_dir"
+    echo "ERROR: Failed to create directory $target_dir for model $model_version_id"
     return 1
   }
 
@@ -51,11 +55,11 @@ download_civit_model() {
     # Get model metadata
     local api_response
     local api_status
-    api_response=$(curl -s -w "%{http_code}" -H "Authorization: Bearer $CIVITAI_TOKEN" \
+    api_response=$(curl -s -m "$CURL_TIMEOUT" -w "%{http_code}" -H "Authorization: Bearer $CIVITAI_TOKEN" \
       "https://civitai.com/api/v1/model-versions/$model_version_id" || echo "CURL_FAILED")
 
     if [[ "$api_response" == "CURL_FAILED" ]]; then
-      echo "ERROR: Curl failed for model $model_version_id"
+      echo "ERROR: Curl failed for model $model_version_id (timeout or network issue)"
       sleep $RETRY_DELAY
       ((attempt++))
       continue
@@ -117,6 +121,7 @@ download_civit_model() {
     # Check if model file already exists
     if [ -f "$model_file" ]; then
       echo "Model file already exists: $model_file, skipping download"
+      DOWNLOAD_STATUS["$model_version_id"]="Success (already exists)"
       return 0
     fi
 
@@ -128,20 +133,21 @@ download_civit_model() {
 
     # Download model file
     echo "Downloading model: $base_filename"
-    if curl -fL -H "Authorization: Bearer $CIVITAI_TOKEN" -o "$model_file" "$download_url"; then
+    if curl -fL -m "$CURL_TIMEOUT" -H "Authorization: Bearer $CIVITAI_TOKEN" -o "$model_file" "$download_url"; then
       # Save description
       local description_html=$(echo "$metadata" | jq -r '.description // ""')
       echo "$description_html" > "$target_dir/${base_filename}.html"
 
       # Download preview image
       if [[ -n "$preview_image" && "$preview_image" != "null" ]]; then
-        curl -fL -o "$target_dir/${base_filename}.preview.png" "$preview_image" || \
+        curl -fL -m "$CURL_TIMEOUT" -o "$target_dir/${base_filename}.preview.png" "$preview_image" || \
           echo "Warning: Failed to download preview image for $model_version_id"
       else
         echo "Warning: No preview image available for $model_version_id"
       fi
 
       echo "Successfully processed model $model_version_id: $model_name ($version_name)"
+      DOWNLOAD_STATUS["$model_version_id"]="Success"
       return 0
     else
       echo "ERROR: Failed to download model file for $model_version_id"
@@ -153,54 +159,46 @@ download_civit_model() {
   done
 
   echo "ERROR: Max retries reached for model $model_version_id"
+  DOWNLOAD_STATUS["$model_version_id"]="Failed (max retries reached)"
   return 1
 }
 
-# Function to download multiple models in parallel
+# Wrapper function for xargs
+download_model_wrapper() {
+  local id=$1
+  local target_dir
+  local model_id
+
+  # Determine if it's a model or LoRA based on prefix
+  if [[ "${id:0:1}" == "m" ]]; then
+    target_dir="$MODEL_DIR"
+    model_id="${id:1}"
+  else
+    target_dir="$LORA_DIR"
+    model_id="${id:1}"
+  fi
+
+  download_civit_model "$model_id" "$target_dir" && \
+    echo "Completed download of $id" || \
+    echo "Failed download of $id"
+}
+
+export -f download_civit_model download_model_wrapper sanitize
+export CIVITAI_TOKEN MODEL_DIR LORA_DIR MAX_RETRIES RETRY_DELAY CURL_TIMEOUT DOWNLOAD_STATUS
+
+# Function to download multiple models in parallel using xargs
 download_batch() {
   local ids=("$@")
-  local running=0
-  local jobs=()
 
+  echo "Starting parallel download of ${#ids[@]} models/LoRAs..."
+  printf "%s\n" "${ids[@]}" | xargs -n 1 -P "$MAX_PARALLEL" -I {} bash -c 'download_model_wrapper "{}"'
+
+  # Print summary of download outcomes
+  echo "=== Download Summary ==="
   for id in "${ids[@]}"; do
-    local target_dir
-    local model_id
-
-    # Determine if it's a model or LoRA based on prefix
-    if [[ "${id:0:1}" == "m" ]]; then
-      target_dir="$MODEL_DIR"
-      model_id="${id:1}"
-    else
-      target_dir="$LORA_DIR"
-      model_id="${id:1}"
-    fi
-
-    # Run download in background
-    (download_civit_model "$model_id" "$target_dir" && \
-      echo "Completed download of $id" || \
-      echo "Failed download of $id") &
-    jobs+=($!)
-
-    # Track running jobs
-    ((running++))
-
-    # Limit parallelism
-    if [ $running -ge $MAX_PARALLEL ]; then
-      # Wait for any job to finish
-      for job in "${jobs[@]}"; do
-        if wait "$job" 2>/dev/null; then
-          ((running--))
-          # Remove finished job from array
-          jobs=("${jobs[@]/$job}")
-          break
-        fi
-      done
-    fi
-  done
-
-  # Wait for all remaining jobs
-  for job in "${jobs[@]}"; do
-    wait "$job" 2>/dev/null
+    model_id="${id:1}"
+    status="${DOWNLOAD_STATUS[$model_id]:-Not attempted}"
+    echo "$id: $status"
   done
 }
 
@@ -246,8 +244,3 @@ wget -nc https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safet
 
 # Download models and LoRAs with parallel processing (prefix m=model, l=lora)
 echo "=== Downloading models and LoRAs in parallel (max $MAX_PARALLEL) ==="
-download_batch \
-  "m1166878" "m1612720" "m1111838" \
-  "l1568786" "l1074877" "l1486082" "l1360425" "l1470544" "l1645427" "l999582" "l1364444" "l1458421"
-
-echo "Provisioning completed successfully! Check $MODEL_DIR and $LORA_DIR"
