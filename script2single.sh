@@ -220,6 +220,7 @@ download_civit_model 1674551 "$LORA_DIR"
 download_civit_model 999582 "$LORA_DIR"
 download_civit_model 1364444 "$LORA_DIR"
 download_civit_model 1458421 "$LORA_DIR"
+download_civit_model 960678 "$LORA_DIR"
 
 # Verify all models and LoRAs are installed
 echo "=== Verifying model installations ==="
@@ -228,7 +229,7 @@ for model_id in 1166878 1612720 1111838; do
 done
 
 echo "=== Verifying LoRA installations ==="
-for lora_id in 1568786 1074877 1486082 1360425 1470544 1674551 999582 1364444 1458421; do
+for lora_id in 1568786 1074877 1486082 1360425 1470544 1674551 999582 1364444 1458421 960678; do
   check_model_installed "$lora_id" "$LORA_DIR"
 done
 
