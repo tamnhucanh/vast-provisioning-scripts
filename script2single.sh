@@ -117,6 +117,66 @@ install_extension() {
   fi
 }
 
+# Function to check if a model is installed
+check_model_installed() {
+  local model_version_id=$1
+  local target_dir=$2
+  local max_retries=3
+  local retry_count=0
+  local success=false
+
+  while [ $retry_count -lt $max_retries ]; do
+    # Fetch metadata to get expected filename
+    local api_response
+    local api_status
+    api_response=$(curl -s -w "%{http_code}" -H "Authorization: Bearer $CIVITAI_TOKEN" \
+      "https://civitai.com/api/v1/model-versions/$model_version_id")
+    
+    api_status=${api_response: -3}
+    local metadata=${api_response:0:${#api_response}-3}
+    
+    if [[ $api_status != "200" ]]; then
+      echo "ERROR: Failed to get metadata for model $model_version_id (HTTP $api_status)"
+      retry_count=$((retry_count + 1))
+      sleep 5
+      continue
+    fi
+    
+    local model_name=$(echo "$metadata" | jq -r '.model.name // "unknown"')
+    local version_name=$(echo "$metadata" | jq -r '.name // "unknown"')
+    local primary_file=$(echo "$metadata" | jq -r '.files[] | select(.primary) | .name')
+    
+    if [[ "$model_name" == "null" || "$model_name" == "unknown" ]]; then
+      echo "ERROR: Could not determine model name for $model_version_id"
+      retry_count=$((retry_count + 1))
+      sleep 5
+      continue
+    fi
+    
+    local safe_model_name=$(sanitize "$model_name")
+    local safe_version_name=$(sanitize "$version_name")
+    local base_filename="${safe_model_name}_${safe_version_name}"
+    local expected_file="$target_dir/${base_filename}.${primary_file##*.}"
+    
+    # Check if the model file exists
+    if [ -f "$expected_file" ]; then
+      echo "Model $model_version_id is installed: $expected_file"
+      success=true
+      break
+    else
+      echo "Model $model_version_id not found, retrying installation (Attempt $((retry_count + 1))/$max_retries)"
+      download_civit_model "$model_version_id" "$target_dir"
+      retry_count=$((retry_count + 1))
+      sleep 5
+    fi
+  done
+
+  if [ "$success" = false ]; then
+    echo "ERROR: Failed to install model $model_version_id after $max_retries attempts"
+    exit 1
+  fi
+}
+
 # -------------------- Main Execution -------------------- #
 
 echo "Starting provisioning script for Forge UI customization..."
@@ -161,4 +221,15 @@ download_civit_model 999582 "$LORA_DIR"
 download_civit_model 1364444 "$LORA_DIR"
 download_civit_model 1458421 "$LORA_DIR"
 
-echo "Provisioning completed successfully! Check $MODEL_DIR and $LORA_DIR"
+# Verify all models and LoRAs are installed
+echo "=== Verifying model installations ==="
+for model_id in 1166878 1612720 1111838; do
+  check_model_installed "$model_id" "$MODEL_DIR"
+done
+
+echo "=== Verifying LoRA installations ==="
+for lora_id in 1568786 1074877 1486082 1360425 1470544 1674551 999582 1364444 1458421; do
+  check_model_installed "$lora_id" "$LORA_DIR"
+done
+
+echo "Provisioning completed successfully! All models and LoRAs verified in $MODEL_DIR and $LORA_DIR"
