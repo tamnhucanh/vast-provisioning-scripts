@@ -99,6 +99,18 @@ download_civit_model() {
     echo "Warning: No preview image available for $model_version_id"
   fi
   
+  # For LoRAs, create a .civitai.info file compatible with sd-civitai-browser-plus
+  if [[ "$target_dir" == "$LORA_DIR" ]]; then
+    local trained_words=$(echo "$metadata" | jq -r '.trainedWords // [] | join(", ")')
+    if [[ -n "$trained_words" && "$trained_words" != "null" ]]; then
+      echo "Saving trigger words for LoRA: $trained_words"
+    else
+      echo "Warning: No trigger words found for LoRA $model_version_id"
+    fi
+    # Create .civitai.info file with full metadata for compatibility
+    echo "$metadata" > "$target_dir/${base_filename}.civitai.info"
+  fi
+  
   echo "Successfully processed model $model_version_id: $model_name ($version_name)"
   return 0
 }
@@ -229,8 +241,4 @@ for model_id in 1166878 1612720 1111838; do
 done
 
 echo "=== Verifying LoRA installations ==="
-for lora_id in 1568786 1074877 1486082 1360425 1470544 1674551 999582 1364444 1458421 960678; do
-  check_model_installed "$lora_id" "$LORA_DIR"
-done
-
-echo "Provisioning completed successfully! All models and LoRAs verified in $MODEL_DIR and $LORA_DIR"
+for lora_id in 1568786 1074877 1486082 1360425 1470544 1674551 999
