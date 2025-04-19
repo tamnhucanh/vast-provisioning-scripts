@@ -15,6 +15,20 @@ FORGE_PATH="/workspace/stable-diffusion-webui-forge"
 MODEL_DIR="$FORGE_PATH/models/Stable-diffusion"
 LORA_DIR="$FORGE_PATH/models/Lora"
 
+# Download custom ui-config.json
+echo "Downloading custom ui-config.json..."
+curl -fL -o "$FORGE_PATH/ui-config.json" \
+  "https://raw.githubusercontent.com/tamnhucanh/vast-provisioning-scripts/refs/heads/main/ui-config.json" || {
+    echo "WARNING: Failed to download ui-config.json, proceeding with default settings"
+  }
+
+# Verify the file exists
+if [ ! -f "$FORGE_PATH/ui-config.json" ]; then
+  echo "WARNING: ui-config.json not found after download attempt, proceeding with default settings"
+else
+  echo "Successfully downloaded ui-config.json to $FORGE_PATH/ui-config.json"
+fi
+
 # Function to sanitize filenames
 sanitize() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-'
@@ -241,4 +255,8 @@ for model_id in 1166878 1612720 1111838; do
 done
 
 echo "=== Verifying LoRA installations ==="
-for lora_id in 1568786 1074877 1486082 1360425 1470544 1674551 999
+for lora_id in 1568786 1074877 1486082 1360425 1470544 1674551 999582 1364444 1458421 960678; do
+  check_model_installed "$lora_id" "$LORA_DIR"
+done
+
+echo "Provisioning completed successfully! All models and LoRAs verified in $MODEL_DIR and $LORA_DIR"
