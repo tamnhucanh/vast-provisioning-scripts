@@ -232,8 +232,7 @@ wget -nc https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safet
 # Download base models - NO HARDCODED NAMES, all from API
 echo "=== Downloading base models ==="
 download_civit_model 1166878 "$MODEL_DIR"
-download_civit_model 1612720 "$MODEL_DIR"
-download_civit_model 1111838 "$MODEL_DIR"
+download_civit_model 1761560 "$MODEL_DIR"
 
 # Download LoRAs - NO HARDCODED NAMES, all from API
 echo "=== Downloading LoRAs ==="
@@ -250,7 +249,7 @@ download_civit_model 960678 "$LORA_DIR"
 
 # Verify all models and LoRAs are installed
 echo "=== Verifying model installations ==="
-for model_id in 1166878 1612720 1111838; do
+for model_id in 1166878 1612720 ; do
   check_model_installed "$model_id" "$MODEL_DIR"
 done
 
