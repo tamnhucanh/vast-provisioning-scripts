@@ -275,7 +275,6 @@ ensure_civitai_asset_installed 1360425 "$LORA_DIR"
 ensure_civitai_asset_installed 1470544 "$LORA_DIR"
 ensure_civitai_asset_installed 1674551 "$LORA_DIR"
 ensure_civitai_asset_installed 999582 "$LORA_DIR"
-ensure_civitai_asset_installed 1364444 "$LORA_DIR"
 ensure_civitai_asset_installed 1458421 "$LORA_DIR"
 ensure_civitai_asset_installed 960678 "$LORA_DIR"
 
