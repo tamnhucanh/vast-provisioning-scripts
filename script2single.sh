@@ -1,206 +1,196 @@
 #!/bin/bash
 set -eo pipefail
+
+# --- CONFIGURATION ---
+# Spoof Chrome User-Agent to bypass Cloudflare/WAF
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 # Set CivitAI API token from environment variable
 export CIVITAI_TOKEN="${CIVITAI_TOKEN}"
+
 # Validate token presence
 if [ -z "$CIVITAI_TOKEN" ]; then
-  echo "ERROR: CivitAI token not found! Set CIVITAI_TOKEN in Vast.ai template."
+  echo "ERROR: CivitAI token not found! Set CIVITAI_TOKEN in your environment variables."
   exit 1
 fi
+
 # Base paths
 FORGE_PATH="/workspace/stable-diffusion-webui-forge"
 MODEL_DIR="$FORGE_PATH/models/Stable-diffusion"
 LORA_DIR="$FORGE_PATH/models/Lora"
+
 # Function to sanitize filenames
 sanitize() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-'
 }
-# ====================== ONLY THIS FUNCTION MODIFIED (retries 10 → 5) =====================
+
+# ====================================================================================
+#  CORE FUNCTION: Bulletproof Civitai Downloader (Metadata -> Fallback -> Validation)
+# ====================================================================================
 download_civit_model() {
   local model_version_id=$1
   local target_dir=$2
-  local max_download_retries=5          # ← changed from 10 to 5
+  local max_download_retries=5
   local download_retry_count=0
   local download_success=false
+  
   mkdir -p "$target_dir" || { echo "ERROR: Failed to create directory $target_dir"; return 1; }
- 
+
   while [ $download_retry_count -lt $max_download_retries ] && [ "$download_success" = false ]; do
-    echo "Attempt $((download_retry_count + 1))/$max_download_retries to download model version $model_version_id..."
+    echo "Attempt $((download_retry_count + 1))/$max_download_retries for Model ID $model_version_id..."
+
+    # --- STEP A: Try Metadata API (Preferred) ---
     local api_response
-    local api_status
-    api_response=$(curl -s -w "%{http_code}" -H "Authorization: Bearer $CIVITAI_TOKEN" \
-      "https://civitai.com/api/v1/model-versions/$model_version_id")
-   
-    api_status=${api_response: -3}
-    local metadata=${api_response:0:${#api_response}-3}
-   
-    # Permanent skip if model version is gone (404)
-    if [[ $api_status == "404" ]]; then
-      echo "ERROR: Model version $model_version_id no longer exists (HTTP 404) — skipping this asset permanently."
-      return 1
+    # Allow failure here (set +e) so we can trigger the fallback
+    set +e 
+    api_response=$(curl -s -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/v1/model-versions/$model_version_id")
+    set -e
+    
+    # Check if we got valid JSON with a model name
+    if echo "$api_response" | jq -e .model.name >/dev/null 2>&1; then
+      # >>> HAPPY PATH: Metadata Success <<<
+      local model_name=$(echo "$api_response" | jq -r '.model.name // "unknown"')
+      local version_name=$(echo "$api_response" | jq -r '.name // "unknown"')
+      local primary_file=$(echo "$api_response" | jq -r '.files[] | select(.primary == true) | .name')
+      local download_url=$(echo "$api_response" | jq -r '.files[] | select(.primary == true) | .downloadUrl')
+      local preview_image=$(echo "$api_response" | jq -r '.images[0].url // ""')
+
+      # Check for "Region Blocked" or missing file
+      if [[ -z "$download_url" || "$download_url" == "null" ]]; then
+         echo "WARNING: Metadata found but no download URL (likely Region Blocked or Private)."
+         # Force fallback to see if direct download works
+         api_response="INVALID" 
+      else
+          local safe_name=$(sanitize "$model_name")
+          local safe_ver=$(sanitize "$version_name")
+          local filename="${safe_name}_${safe_ver}.${primary_file##*.}"
+          
+          echo "Metadata found: $model_name ($version_name). Downloading..."
+          
+          if curl -L -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" -o "$target_dir/$filename" "$download_url"; then
+            # Save Metadata
+            echo "$api_response" > "$target_dir/${filename%.*}.json"
+            # Save Preview
+            if [[ -n "$preview_image" && "$preview_image" != "null" ]]; then
+                curl -sL -A "$USER_AGENT" -o "$target_dir/${filename%.*}.preview.png" "$preview_image" || true
+            fi
+            download_success=true
+          fi
+      fi
     fi
-    if [[ $api_status != "200" ]]; then
-      echo "ERROR: Failed to get metadata for model $model_version_id (HTTP $api_status)"
-      echo "API Response: $metadata"
-      download_retry_count=$((download_retry_count + 1))
-      sleep 7
-      continue
+
+    # --- STEP B: Direct Fallback (If API failed or was blocked) ---
+    if [ "$download_success" = false ]; then
+      echo "WARNING: Metadata API failed or blocked. Attempting BLIND DIRECT DOWNLOAD..."
+      
+      # Switch to target dir so curl -O saves there
+      pushd "$target_dir" > /dev/null
+      set +e
+      # -J: Remote Header Name, -O: Save File, -L: Follow Redirects
+      if curl -L -J -O -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/download/models/$model_version_id"; then
+        download_success=true
+      fi
+      set -e
+      popd > /dev/null
     fi
-   
-    # Validate JSON response
-    if ! echo "$metadata" | jq . > /dev/null 2>&1; then
-      echo "ERROR: Invalid JSON response for model $model_version_id metadata fetch."
-      download_retry_count=$((download_retry_count + 1))
-      sleep 7
-      continue
+
+    # --- STEP C: Validation (Check for HTML "Access Denied" files) ---
+    if [ "$download_success" = true ]; then
+      # Find the most recently modified file in target_dir to check it
+      local downloaded_file=$(ls -t "$target_dir" | head -n1)
+      local file_path="$target_dir/$downloaded_file"
+      
+      # Check if file is actually an HTML error page (Cloudflare Block)
+      if file "$file_path" | grep -q "HTML"; then
+        echo "ERROR: Downloaded file is an HTML Cloudflare Block page (HTTP 403/451). Deleting."
+        rm -f "$file_path"
+        download_success=false
+        sleep 5
+      elif [ ! -s "$file_path" ]; then
+         echo "ERROR: Downloaded file is empty."
+         rm -f "$file_path"
+         download_success=false
+      else
+        echo "SUCCESS: Downloaded $downloaded_file"
+        return 0
+      fi
     fi
-   
-    # Extract model info
-    local model_name=$(echo "$metadata" | jq -r '.model.name // "unknown"')
-    local version_name=$(echo "$metadata" | jq -r '.name // "unknown"')
-    local model_type=$(echo "$metadata" | jq -r '.model.type // "unknown"')
-   
-    echo "Model info: '$model_name' version '$version_name' (type: $model_type)"
-   
-    if [[ "$model_name" == "null" || "$model_name" == "unknown" ]]; then
-      echo "ERROR: Could not determine model name for $model_version_id from metadata."
-      download_retry_count=$((download_retry_count + 1))
-      sleep 7
-      continue
-    fi
-   
-    # Extract file info — fixed selector (was missing == true)
-    local primary_file=$(echo "$metadata" | jq -r '.files[] | select(.primary == true) | .name')
-    local download_url=$(echo "$metadata" | jq -r '.files[] | select(.primary == true) | .downloadUrl')
-    local preview_image=$(echo "$metadata" | jq -r '.images[0].url // ""')
-   
-    # CRITICAL FIX: Skip if no valid download URL (deleted/private file)
-    if [[ -z "$download_url" || "$download_url" == "null" || "$download_url" == "" ]]; then
-      echo "ERROR: No valid download URL for model version $model_version_id (file deleted or private) — skipping permanently."
-      return 1
-    fi
-    if [[ -z "$primary_file" || "$primary_file" == "null" ]]; then
-      echo "ERROR: Could not determine primary file name for model $model_version_id — skipping permanently."
-      return 1
-    fi
-    # Sanitize names
-    local safe_model_name=$(sanitize "$model_name")
-    local safe_version_name=$(sanitize "$version_name")
-    local base_filename="${safe_model_name}_${safe_version_name}"
-    local expected_model_file="$target_dir/${base_filename}.${primary_file##*.}"
-   
-    echo "Using filename base: $base_filename"
-   
-    # Save raw JSON metadata
-    echo "$metadata" > "$target_dir/${base_filename}.json"
-   
-    # Download model file
-    if curl -fL -H "Authorization: Bearer $CIVITAI_TOKEN" -o "$expected_model_file" "$download_url"; then
-      echo "Successfully downloaded model file for $model_version_id."
-      download_success=true
-    else
-      echo "ERROR: Failed to download model file for $model_version_id. Retrying..."
-      rm -f "$expected_model_file" # clean partial download
-      download_retry_count=$((download_retry_count + 1))
-      sleep 7
-      continue
-    fi
-    # Save description
-    local description_html=$(echo "$metadata" | jq -r '.description // ""')
-    echo "$description_html" > "$target_dir/${base_filename}.html"
-   
-    # Download preview image
-    if [[ -n "$preview_image" && "$preview_image" != "null" ]]; then
-      curl -fL -o "$target_dir/${base_filename}.preview.png" \
-        "$preview_image" || echo "Warning: Failed to download preview image for $model_version_id"
-    else
-      echo "Warning: No preview image available for $model_version_id"
-    fi
-   
-    # For LoRAs, create .civitai.info file
-    if [[ "$target_dir" == "$LORA_DIR" ]]; then
-      local trained_words=$(echo "$metadata" | jq -r '.trainedWords // [] | join(", ")')
-      echo "$metadata" > "$target_dir/${base_filename}.civitai.info"
-    fi
+
+    download_retry_count=$((download_retry_count + 1))
+    echo "Retrying in 5 seconds..."
+    sleep 5
   done
-  if [ "$download_success" = false ]; then
-    echo "WARNING: Failed to download model $model_version_id after $max_download_retries attempts — skipping this asset."
-    return 1
-  fi
-  echo "Successfully processed model $model_version_id: $model_name ($version_name)"
-  return 0
+
+  echo "FAILURE: Could not download model $model_version_id after $max_download_retries attempts."
+  return 1
 }
-# ====================== ONLY THIS FUNCTION MODIFIED (non-fatal on skip) =====================
+
+# ====================================================================================
+#  WRAPPER: Ensure Installed (Non-Fatal)
+# ====================================================================================
 ensure_civitai_asset_installed() {
   local model_version_id=$1
   local target_dir=$2
-  local max_installation_retries=3
-  local installation_retry_count=0
-  while [ $installation_retry_count -lt $max_installation_retries ]; do
-    if download_civit_model "$model_version_id" "$target_dir"; then
-      return 0
-    else
-      installation_retry_count=$((installation_retry_count + 1))
-      echo "WARNING: Retry $installation_retry_count/$max_installation_retries for asset $model_version_id"
-      sleep 7
-    fi
-  done
-  echo "ERROR: Skipping CivitAI asset $model_version_id after multiple failures (likely deleted/private)."
-  return 1 # Non-fatal
+  
+  if download_civit_model "$model_version_id" "$target_dir"; then
+    return 0
+  else
+    echo "ERROR: Permanently skipped CivitAI asset $model_version_id (Failed)."
+    return 1 # Non-fatal, allows script to continue
+  fi
 }
-# ====================== download_file_with_retries — unchanged =====================
+
+# ====================================================================================
+#  HELPER: Standard File Downloader
+# ====================================================================================
 download_file_with_retries() {
   local url=$1
   local output_path=$2
-  local max_retries=10
+  local max_retries=5
   local retry_count=0
+  
   mkdir -p "$(dirname "$output_path")"
+  
   while [ $retry_count -lt $max_retries ]; do
-    echo "Attempt $((retry_count + 1))/$max_retries to download $url to $output_path"
-    if curl -fL -o "$output_path" "$url"; then
+    if curl -fL -A "$USER_AGENT" -o "$output_path" "$url"; then
       echo "Successfully downloaded $output_path"
       return 0
     else
-      echo "WARNING: Failed to download $url. Retrying in 7 seconds..."
+      echo "WARNING: Failed to download $url. Retrying..."
       rm -f "$output_path"
       retry_count=$((retry_count + 1))
-      sleep 7
+      sleep 5
     fi
   done
-  echo "ERROR: Skipping $output_path after $max_retries failed attempts."
+  echo "ERROR: Skipping $output_path after failures."
   return 1
 }
-# Keep your original install_extension (unchanged except sleep 7)
+
+# ====================================================================================
+#  HELPER: Extension Installer
+# ====================================================================================
 install_extension() {
   local repo_url=$1
   local repo_name=$(basename "$repo_url" .git)
   local target_dir="$FORGE_PATH/extensions/$repo_name"
-  local max_retries=5
-  local retry_count=0
-  local success=false
-  while [ $retry_count -lt $max_retries ] && [ "$success" = false ]; do
-    if [ ! -d "$target_dir" ]; then
-      echo "Attempt $((retry_count + 1))/$max_retries to install extension: $repo_name"
-      if git clone "$repo_url" "$target_dir"; then
-        echo "Successfully installed extension: $repo_name"
-        success=true
-      else
-        echo "WARNING: Failed to clone $repo_name. Retrying in 7 seconds..."
-        retry_count=$((retry_count + 1))
-        sleep 7
-      fi
-    else
-      echo "Extension already installed: $repo_name"
-      success=true
-    fi
-  done
-  if [ "$success" = false ]; then
-    echo "WARNING: Could not install extension $repo_name — continuing anyway."
+  
+  if [ ! -d "$target_dir" ]; then
+    echo "Installing extension: $repo_name"
+    git clone "$repo_url" "$target_dir" || echo "WARNING: Failed to clone $repo_name"
+  else
+    echo "Extension already installed: $repo_name"
   fi
 }
-# -------------------- Main Execution (now fully resilient) -------------------- #
+
+# ====================================================================================
+#  MAIN EXECUTION FLOW
+# ====================================================================================
+
 echo "Starting provisioning script..."
+
+# 1. Forge Config & Extensions
 download_file_with_retries "https://raw.githubusercontent.com/tamnhucanh/vast-provisioning-scripts/refs/heads/main/ui-config.json" "$FORGE_PATH/ui-config.json" || true
+
 install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" || true
 install_extension "https://github.com/camenduru/sd-webui-additional-networks.git" || true
 install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" || true
@@ -208,16 +198,23 @@ install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git
 install_extension "https://github.com/adieyal/sd-dynamic-prompts.git" || true
 install_extension "https://github.com/Bing-su/adetailer.git" || true
 install_extension "https://github.com/BlafKing/sd-civitai-browser-plus.git" || true
+
+# 2. ControlNet Models
 mkdir -p "$FORGE_PATH/extensions/sd-webui-controlnet/models"
 download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_canny.pth" "$FORGE_PATH/extensions/sd-webui-controlnet/models/control_v11p_sd15_canny.pth" || true
 download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.pth" "$FORGE_PATH/extensions/sd-webui-controlnet/models/control_v11p_sd15_openpose.pth" || true
+
+# 3. VAE
 mkdir -p "$FORGE_PATH/models/VAE"
 download_file_with_retries "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors" "$FORGE_PATH/models/VAE/sdxl_vae.safetensors" || true
-echo "=== Downloading base models (missing ones will be skipped) ==="
-ensure_civitai_asset_installed 1166878 "$MODEL_DIR" || echo "Skipped base model 1166878 (no longer available)"
-ensure_civitai_asset_installed 1761560 "$MODEL_DIR" || echo "Skipped base model 1761560 (no longer available)"
-echo "=== Downloading LoRAs (missing ones will be skipped) ==="
-# 1568786 removed as previously requested
+
+# 4. Base Models (Civitai)
+echo "=== Downloading Base Models ==="
+ensure_civitai_asset_installed 1166878 "$MODEL_DIR" || echo "Skipped 1166878"
+ensure_civitai_asset_installed 1761560 "$MODEL_DIR" || echo "Skipped 1761560"
+
+# 5. LoRAs (Civitai)
+echo "=== Downloading LoRAs ==="
 ensure_civitai_asset_installed 1074877 "$LORA_DIR" || echo "Skipped LoRA 1074877"
 ensure_civitai_asset_installed 1486082 "$LORA_DIR" || echo "Skipped LoRA 1486082"
 ensure_civitai_asset_installed 1360425 "$LORA_DIR" || echo "Skipped LoRA 1360425"
@@ -226,4 +223,5 @@ ensure_civitai_asset_installed 1674551 "$LORA_DIR" || echo "Skipped LoRA 1674551
 ensure_civitai_asset_installed 999582 "$LORA_DIR" || echo "Skipped LoRA 999582"
 ensure_civitai_asset_installed 1458421 "$LORA_DIR" || echo "Skipped LoRA 1458421"
 ensure_civitai_asset_installed 960678 "$LORA_DIR" || echo "Skipped LoRA 960678"
-echo "Provisioning completed! Any deleted/unavailable models were automatically skipped."
+
+echo "Provisioning completed successfully!"
