@@ -1,5 +1,16 @@
 #!/bin/bash
-set -eo pipefail
+
+# ====================================================================================
+#  GLOBAL ERROR HANDLING
+# ====================================================================================
+
+# set -e: Exit immediately if a command exits with a non-zero status.
+# set -u: Treat unset variables as an error.
+# set -o pipefail: Pipeline returns the status of the last command to exit with a non-zero status.
+set -euo pipefail
+
+# TRAP: Print the line number if an error occurs.
+trap 'echo "🚨 SCRIPT CRASHED on line $LINENO: The provisioning script encountered a critical error. Stopping further execution." >&2' ERR
 
 # --- CONFIGURATION ---
 # Spoof Chrome User-Agent to bypass Cloudflare/WAF
@@ -11,6 +22,7 @@ export CIVITAI_TOKEN="${CIVITAI_TOKEN}"
 # Validate token presence
 if [ -z "$CIVITAI_TOKEN" ]; then
   echo "ERROR: CivitAI token not found! Set CIVITAI_TOKEN in your environment variables."
+  # Crucially, this exit ensures the container stops immediately if the token is missing.
   exit 1
 fi
 
@@ -57,9 +69,9 @@ download_civit_model() {
 
       # Check for "Region Blocked" or missing file
       if [[ -z "$download_url" || "$download_url" == "null" ]]; then
-         echo "WARNING: Metadata found but no download URL (likely Region Blocked or Private)."
-         # Force fallback to see if direct download works
-         api_response="INVALID" 
+          echo "WARNING: Metadata found but no download URL (likely Region Blocked or Private)."
+          # Force fallback to see if direct download works
+          api_response="INVALID" 
       else
           local safe_name=$(sanitize "$model_name")
           local safe_ver=$(sanitize "$version_name")
@@ -72,7 +84,8 @@ download_civit_model() {
             echo "$api_response" > "$target_dir/${filename%.*}.json"
             # Save Preview
             if [[ -n "$preview_image" && "$preview_image" != "null" ]]; then
-                curl -sL -A "$USER_AGENT" -o "$target_dir/${filename%.*}.preview.png" "$preview_image" || true
+              # Using || true here to make the preview download non-fatal
+              curl -sL -A "$USER_AGENT" -o "$target_dir/${filename%.*}.preview.png" "$preview_image" || true
             fi
             download_success=true
           fi
@@ -101,15 +114,16 @@ download_civit_model() {
       local file_path="$target_dir/$downloaded_file"
       
       # Check if file is actually an HTML error page (Cloudflare Block)
+      # NOTE: This line requires the 'file' utility, which we added to the Argument 2 install list.
       if file "$file_path" | grep -q "HTML"; then
         echo "ERROR: Downloaded file is an HTML Cloudflare Block page (HTTP 403/451). Deleting."
         rm -f "$file_path"
         download_success=false
         sleep 5
       elif [ ! -s "$file_path" ]; then
-         echo "ERROR: Downloaded file is empty."
-         rm -f "$file_path"
-         download_success=false
+          echo "ERROR: Downloaded file is empty."
+          rm -f "$file_path"
+          download_success=false
       else
         echo "SUCCESS: Downloaded $downloaded_file"
         return 0
@@ -122,7 +136,7 @@ download_civit_model() {
   done
 
   echo "FAILURE: Could not download model $model_version_id after $max_download_retries attempts."
-  return 1
+  return 1 # Explicitly return 1 on failure
 }
 
 # ====================================================================================
@@ -132,11 +146,12 @@ ensure_civitai_asset_installed() {
   local model_version_id=$1
   local target_dir=$2
   
+  # Return the status of the download_civit_model function
   if download_civit_model "$model_version_id" "$target_dir"; then
     return 0
   else
     echo "ERROR: Permanently skipped CivitAI asset $model_version_id (Failed)."
-    return 1 # Non-fatal, allows script to continue
+    return 0 # CRITICAL FIX: Return 0 here to make asset download failures non-fatal for the script flow
   fi
 }
 
@@ -163,7 +178,7 @@ download_file_with_retries() {
     fi
   done
   echo "ERROR: Skipping $output_path after failures."
-  return 1
+  return 1 # Return 1 if ALL retries fail
 }
 
 # ====================================================================================
@@ -176,6 +191,7 @@ install_extension() {
   
   if [ ! -d "$target_dir" ]; then
     echo "Installing extension: $repo_name"
+    # Added || true to make Git clones non-fatal, as network issues can break them
     git clone "$repo_url" "$target_dir" || echo "WARNING: Failed to clone $repo_name"
   else
     echo "Extension already installed: $repo_name"
@@ -191,13 +207,14 @@ echo "Starting provisioning script..."
 # 1. Forge Config & Extensions
 download_file_with_retries "https://raw.githubusercontent.com/tamnhucanh/vast-provisioning-scripts/refs/heads/main/ui-config.json" "$FORGE_PATH/ui-config.json" || true
 
-install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" || true
-install_extension "https://github.com/camenduru/sd-webui-additional-networks.git" || true
-install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" || true
-install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git" || true
-install_extension "https://github.com/adieyal/sd-dynamic-prompts.git" || true
-install_extension "https://github.com/Bing-su/adetailer.git" || true
-install_extension "https://github.com/BlafKing/sd-civitai-browser-plus.git" || true
+# CRITICAL: Removed the trailing || true to allow the individual failures to be caught by the trap
+install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" 
+install_extension "https://github.com/camenduru/sd-webui-additional-networks.git" 
+install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" 
+install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git" 
+install_extension "https://github.com/adieyal/sd-dynamic-prompts.git" 
+install_extension "https://github.com/Bing-su/adetailer.git" 
+install_extension "https://github.com/BlafKing/sd-civitai-browser-plus.git" 
 
 # 2. ControlNet Models
 mkdir -p "$FORGE_PATH/extensions/sd-webui-controlnet/models"
@@ -210,18 +227,19 @@ download_file_with_retries "https://huggingface.co/stabilityai/sdxl-vae/resolve/
 
 # 4. Base Models (Civitai)
 echo "=== Downloading Base Models ==="
-ensure_civitai_asset_installed 1166878 "$MODEL_DIR" || echo "Skipped 1166878"
-ensure_civitai_asset_installed 1761560 "$MODEL_DIR" || echo "Skipped 1761560"
+# NTR Mix model (1166878) REMAINS
+ensure_civitai_asset_installed 1166878 "$MODEL_DIR" 
+# Wai-NSFW-Illus model (1761560) HAS BEEN REMOVED
 
 # 5. LoRAs (Civitai)
 echo "=== Downloading LoRAs ==="
-ensure_civitai_asset_installed 1074877 "$LORA_DIR" || echo "Skipped LoRA 1074877"
-ensure_civitai_asset_installed 1486082 "$LORA_DIR" || echo "Skipped LoRA 1486082"
-ensure_civitai_asset_installed 1360425 "$LORA_DIR" || echo "Skipped LoRA 1360425"
-ensure_civitai_asset_installed 1470544 "$LORA_DIR" || echo "Skipped LoRA 1470544"
-ensure_civitai_asset_installed 1674551 "$LORA_DIR" || echo "Skipped LoRA 1674551"
-ensure_civitai_asset_installed 999582 "$LORA_DIR" || echo "Skipped LoRA 999582"
-ensure_civitai_asset_installed 1458421 "$LORA_DIR" || echo "Skipped LoRA 1458421"
-ensure_civitai_asset_installed 960678 "$LORA_DIR" || echo "Skipped LoRA 960678"
+ensure_civitai_asset_installed 1074877 "$LORA_DIR" 
+ensure_civitai_asset_installed 1486082 "$LORA_DIR" 
+ensure_civitai_asset_installed 1360425 "$LORA_DIR" 
+ensure_civitai_asset_installed 1470544 "$LORA_DIR" 
+ensure_civitai_asset_installed 1674551 "$LORA_DIR" 
+ensure_civitai_asset_installed 999582 "$LORA_DIR" 
+ensure_civitai_asset_installed 1458421 "$LORA_DIR" 
+ensure_civitai_asset_installed 960678 "$LORA_DIR" 
 
 echo "Provisioning completed successfully!"
