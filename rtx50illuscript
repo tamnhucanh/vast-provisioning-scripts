@@ -13,28 +13,21 @@ if [ -z "$CIVITAI_TOKEN" ]; then
   exit 1
 fi
 
-# --- CRITICAL PATH SEPARATION ---
-# APP_DIR: Where the code runs (Ephemeral, fast). Extensions go here.
+# --- PATHS ---
 APP_DIR="/app/stable-diffusion-webui-forge"
-# STORAGE_DIR: Where the models live (Persistent). Heavy files go here.
 STORAGE_DIR="/workspace/stable-diffusion-webui-forge"
 
-# Define specific subdirectories
 EXT_DIR="$APP_DIR/extensions"
 MODEL_DIR="$STORAGE_DIR/models/Stable-diffusion"
 LORA_DIR="$STORAGE_DIR/models/Lora"
 
-# Ensure directories exist
-mkdir -p "$EXT_DIR"
-mkdir -p "$MODEL_DIR"
-mkdir -p "$LORA_DIR"
+mkdir -p "$EXT_DIR" "$MODEL_DIR" "$LORA_DIR"
 
-# Function to sanitize filenames
+# --- HELPER FUNCTIONS ---
+
 sanitize() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-'
 }
-
-# --- HELPER FUNCTIONS (unchanged logic, updated paths) ---
 
 download_file_with_retries() {
   local url=$1
@@ -45,8 +38,9 @@ download_file_with_retries() {
   mkdir -p "$(dirname "$output_path")"
   
   while [ $retry_count -lt $max_retries ]; do
-    if curl -fL -A "$USER_AGENT" -o "$output_path" "$url"; then
-      echo "Successfully downloaded $output_path"
+    # ADDED -s to silence progress bar
+    if curl -sL -A "$USER_AGENT" -o "$output_path" "$url"; then
+      echo "SUCCESS: Downloaded $output_path"
       return 0
     else
       echo "WARNING: Failed to download $url. Retrying..."
@@ -55,19 +49,17 @@ download_file_with_retries() {
       sleep 5
     fi
   done
-  echo "ERROR: Skipping $output_path after failures."
   return 1
 }
 
-# INSTALL EXTENSION DIRECTLY TO APP DIR
 install_extension() {
   local repo_url=$1
   local repo_name=$(basename "$repo_url" .git)
   local target_dir="$EXT_DIR/$repo_name"
   
   if [ ! -d "$target_dir" ]; then
-    echo "Installing extension: $repo_name to $target_dir"
-    git clone "$repo_url" "$target_dir" || echo "WARNING: Failed to clone $repo_name"
+    echo "Installing extension: $repo_name"
+    git clone -q "$repo_url" "$target_dir" || echo "WARNING: Failed to clone $repo_name"
   else
     echo "Extension already installed: $repo_name"
   fi
@@ -85,9 +77,10 @@ download_civit_model() {
   while [ $download_retry_count -lt $max_download_retries ] && [ "$download_success" = false ]; do
     echo "Processing Model ID $model_version_id..."
 
-    # Try Metadata API
+    # Metadata
     local api_response
     set +e 
+    # ADDED -s
     api_response=$(curl -s -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/v1/model-versions/$model_version_id")
     set -e
     
@@ -97,32 +90,31 @@ download_civit_model() {
       local primary_file=$(echo "$api_response" | jq -r '.files[] | select(.primary == true) | .name')
       local download_url=$(echo "$api_response" | jq -r '.files[] | select(.primary == true) | .downloadUrl')
       
-      if [[ -z "$download_url" || "$download_url" == "null" ]]; then
-          echo "WARNING: No download URL found in metadata."
-      else
+      if [[ -n "$download_url" && "$download_url" != "null" ]]; then
           local safe_name=$(sanitize "$model_name")
           local safe_ver=$(sanitize "$version_name")
           local filename="${safe_name}_${safe_ver}.${primary_file##*.}"
           
-          # Check if file already exists in persistent storage
           if [ -f "$target_dir/$filename" ]; then
-             echo "File $filename already exists. Skipping download."
+             echo "File $filename exists. Skipping."
              download_success=true
           else
              echo "Downloading $filename..."
-             if curl -L -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" -o "$target_dir/$filename" "$download_url"; then
+             # ADDED -s
+             if curl -sL -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" -o "$target_dir/$filename" "$download_url"; then
                download_success=true
              fi
           fi
       fi
     fi
 
-    # Direct Fallback
+    # Fallback
     if [ "$download_success" = false ]; then
        echo "Attempting Direct Download for ID $model_version_id..."
        pushd "$target_dir" > /dev/null
        set +e
-       if curl -L -J -O -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/download/models/$model_version_id"; then
+       # ADDED -s
+       if curl -sLJ -O -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/download/models/$model_version_id"; then
          download_success=true
        fi
        set -e
@@ -131,6 +123,7 @@ download_civit_model() {
 
     if [ "$download_success" = true ]; then
        local downloaded_file=$(ls -t "$target_dir" | head -n1)
+       # Validation
        if file "$target_dir/$downloaded_file" | grep -q "HTML"; then
           rm -f "$target_dir/$downloaded_file"
           download_success=false
@@ -153,35 +146,29 @@ ensure_civitai_asset_installed() {
 #  EXECUTION
 # ====================================================================================
 
-echo "--- 1. INSTALLING CONFIG & EXTENSIONS (To App Dir) ---"
-# Download UI Config directly to the running app folder
+echo "--- 1. INSTALLING CONFIG & EXTENSIONS ---"
 download_file_with_retries "https://raw.githubusercontent.com/tamnhucanh/vast-provisioning-scripts/refs/heads/main/ui-config.json" "$APP_DIR/ui-config.json" || true
 
-# Install Extensions directly to the running app folder
+# FIXED: Removed sd-civitai-browser-plus to prevent crash
 install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" 
 install_extension "https://github.com/camenduru/sd-webui-additional-networks.git" 
 install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" 
 install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git" 
 install_extension "https://github.com/adieyal/sd-dynamic-prompts.git" 
 install_extension "https://github.com/Bing-su/adetailer.git" 
-install_extension "https://github.com/BlafKing/sd-civitai-browser-plus.git" 
 
-echo "--- 2. DOWNLOADING MODELS (To Workspace Storage) ---"
-# 2. ControlNet Models (To Workspace, then we rely on --controlnet-dir argument if needed, 
-# but usually it's better to keep these in app dir for speed if they are small. 
-# For now, putting them in APP DIR since they are critical dependencies)
+echo "--- 2. DOWNLOADING MODELS ---"
+# ControlNet Models
 mkdir -p "$EXT_DIR/sd-webui-controlnet/models"
 download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_canny.pth" "$EXT_DIR/sd-webui-controlnet/models/control_v11p_sd15_canny.pth" || true
 download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.pth" "$EXT_DIR/sd-webui-controlnet/models/control_v11p_sd15_openpose.pth" || true
 
-# 3. VAE (To Workspace)
+# VAE
 mkdir -p "$STORAGE_DIR/models/VAE"
 download_file_with_retries "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors" "$STORAGE_DIR/models/VAE/sdxl_vae.safetensors" || true
 
-# 4. Base Models
+# Base Models & LoRAs
 ensure_civitai_asset_installed 1166878 "$MODEL_DIR" 
-
-# 5. LoRAs
 ensure_civitai_asset_installed 1074877 "$LORA_DIR" 
 ensure_civitai_asset_installed 1486082 "$LORA_DIR" 
 ensure_civitai_asset_installed 1360425 "$LORA_DIR" 
