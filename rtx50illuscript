@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# TRAP: Print error line if crash happens
+# ERROR TRAP: Prints line number if script fails
 trap 'echo "🚨 SCRIPT CRASHED on line $LINENO" >&2' ERR
 
 # --- CONFIGURATION ---
@@ -22,20 +22,10 @@ MODEL_DIR="$STORAGE_DIR/models/Stable-diffusion"
 LORA_DIR="$STORAGE_DIR/models/Lora"
 VAE_DIR="$STORAGE_DIR/models/VAE"
 
-# --- 1. INSTALL DEPENDENCIES (Runtime Fixes) ---
-echo "--- Installing System & Python Dependencies ---"
-apt-get update -y
-apt-get install -y pkg-config libcairo2-dev build-essential libgirepository1.0-dev libgl1-mesa-glx libsm6 libxext6 curl file socat procps
-pip install joblib
-
 # Ensure directories exist
 mkdir -p "$EXT_DIR" "$MODEL_DIR" "$LORA_DIR" "$VAE_DIR"
 
 # --- HELPER FUNCTIONS ---
-sanitize() {
-  echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-'
-}
-
 download_file_with_retries() {
   local url=$1
   local output_path=$2
@@ -77,7 +67,9 @@ download_civit_model() {
   mkdir -p "$target_dir"
 
   while [ $count -lt $max_retries ] && [ "$success" = false ]; do
-    # Try Metadata API
+    echo "Processing Model ID $model_version_id..."
+    
+    # 1. Try Metadata API
     local api_response
     set +e 
     api_response=$(curl -s -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/v1/model-versions/$model_version_id")
@@ -90,8 +82,9 @@ download_civit_model() {
       local download_url=$(echo "$api_response" | jq -r '.files[] | select(.primary == true) | .downloadUrl')
       
       if [[ -n "$download_url" && "$download_url" != "null" ]]; then
-          local safe_name=$(sanitize "$model_name")
-          local safe_ver=$(sanitize "$version_name")
+          # Basic sanitization
+          local safe_name=$(echo "$model_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-')
+          local safe_ver=$(echo "$version_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-')
           local filename="${safe_name}_${safe_ver}.${primary_file##*.}"
           
           if [ -f "$target_dir/$filename" ]; then
@@ -106,7 +99,7 @@ download_civit_model() {
       fi
     fi
 
-    # Fallback Direct Download
+    # 2. Direct Fallback if metadata failed
     if [ "$success" = false ]; then
        echo "Attempting Direct Download for ID $model_version_id..."
        pushd "$target_dir" > /dev/null
@@ -119,6 +112,7 @@ download_civit_model() {
     fi
 
     if [ "$success" = true ]; then
+       # Verify file isn't HTML garbage
        local downloaded_file=$(ls -t "$target_dir" | head -n1)
        if file "$target_dir/$downloaded_file" | grep -q "HTML"; then
           rm -f "$target_dir/$downloaded_file"
@@ -145,18 +139,15 @@ ensure_civitai_asset_installed() {
 echo "--- 1. INSTALLING CONFIG & EXTENSIONS ---"
 download_file_with_retries "https://raw.githubusercontent.com/tamnhucanh/vast-provisioning-scripts/refs/heads/main/ui-config.json" "$APP_DIR/ui-config.json" || true
 
-# SAFE EXTENSIONS ONLY
+# --- SAFE EXTENSIONS ONLY ---
 install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" 
 install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git" 
 install_extension "https://github.com/Bing-su/adetailer.git" 
 
-# Removed: sd-civitai-browser-plus (Crash)
-# Removed: sd-webui-additional-networks (Crash)
-# Removed: stable-diffusion-webui-images-browser (High Risk)
-# Removed: sd-dynamic-prompts (Unnecessary)
+# NOTE: Removed sd-civitai-browser-plus and additional-networks due to 'Row' object crashes.
 
 echo "--- 2. DOWNLOADING MODELS ---"
-# ControlNet Models
+# ControlNet
 mkdir -p "$EXT_DIR/sd-webui-controlnet/models"
 download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_canny.pth" "$EXT_DIR/sd-webui-controlnet/models/control_v11p_sd15_canny.pth" || true
 download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.pth" "$EXT_DIR/sd-webui-controlnet/models/control_v11p_sd15_openpose.pth" || true
@@ -164,8 +155,10 @@ download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/re
 # VAE
 download_file_with_retries "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors" "$VAE_DIR/sdxl_vae.safetensors" || true
 
-# Base Models & LoRAs
+# Base Models (NTR Mix ONLY, Wai-NSFW removed)
 ensure_civitai_asset_installed 1166878 "$MODEL_DIR" 
+
+# LoRAs
 ensure_civitai_asset_installed 1074877 "$LORA_DIR" 
 ensure_civitai_asset_installed 1486082 "$LORA_DIR" 
 ensure_civitai_asset_installed 1360425 "$LORA_DIR" 
