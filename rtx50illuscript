@@ -138,17 +138,22 @@ ensure_civitai_asset_installed() {
   if download_civit_model "$1" "$2"; then return 0; else return 0; fi
 }
 
-# --- EXECUTION ---
+# ====================================================================================
+#  EXECUTION
+# ====================================================================================
+
 echo "--- 1. INSTALLING CONFIG & EXTENSIONS ---"
 download_file_with_retries "https://raw.githubusercontent.com/tamnhucanh/vast-provisioning-scripts/refs/heads/main/ui-config.json" "$APP_DIR/ui-config.json" || true
 
-# FIXED: Removed sd-civitai-browser-plus (Crash Cause)
+# SAFE EXTENSIONS ONLY
 install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" 
-install_extension "https://github.com/camenduru/sd-webui-additional-networks.git" 
-install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" 
 install_extension "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git" 
-install_extension "https://github.com/adieyal/sd-dynamic-prompts.git" 
 install_extension "https://github.com/Bing-su/adetailer.git" 
+
+# Removed: sd-civitai-browser-plus (Crash)
+# Removed: sd-webui-additional-networks (Crash)
+# Removed: stable-diffusion-webui-images-browser (High Risk)
+# Removed: sd-dynamic-prompts (Unnecessary)
 
 echo "--- 2. DOWNLOADING MODELS ---"
 # ControlNet Models
