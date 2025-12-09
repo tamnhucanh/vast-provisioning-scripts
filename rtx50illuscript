@@ -20,11 +20,18 @@ STORAGE_DIR="/workspace/stable-diffusion-webui-forge"
 EXT_DIR="$APP_DIR/extensions"
 MODEL_DIR="$STORAGE_DIR/models/Stable-diffusion"
 LORA_DIR="$STORAGE_DIR/models/Lora"
+VAE_DIR="$STORAGE_DIR/models/VAE"
 
-mkdir -p "$EXT_DIR" "$MODEL_DIR" "$LORA_DIR"
+# --- 1. INSTALL DEPENDENCIES (Runtime Fixes) ---
+echo "--- Installing System & Python Dependencies ---"
+apt-get update -y
+apt-get install -y pkg-config libcairo2-dev build-essential libgirepository1.0-dev libgl1-mesa-glx libsm6 libxext6 curl file socat procps
+pip install joblib
+
+# Ensure directories exist
+mkdir -p "$EXT_DIR" "$MODEL_DIR" "$LORA_DIR" "$VAE_DIR"
 
 # --- HELPER FUNCTIONS ---
-
 sanitize() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]._-'
 }
@@ -34,11 +41,8 @@ download_file_with_retries() {
   local output_path=$2
   local max_retries=5
   local retry_count=0
-  
   mkdir -p "$(dirname "$output_path")"
-  
   while [ $retry_count -lt $max_retries ]; do
-    # ADDED -s to silence progress bar
     if curl -sL -A "$USER_AGENT" -o "$output_path" "$url"; then
       echo "SUCCESS: Downloaded $output_path"
       return 0
@@ -56,7 +60,6 @@ install_extension() {
   local repo_url=$1
   local repo_name=$(basename "$repo_url" .git)
   local target_dir="$EXT_DIR/$repo_name"
-  
   if [ ! -d "$target_dir" ]; then
     echo "Installing extension: $repo_name"
     git clone -q "$repo_url" "$target_dir" || echo "WARNING: Failed to clone $repo_name"
@@ -68,19 +71,15 @@ install_extension() {
 download_civit_model() {
   local model_version_id=$1
   local target_dir=$2
-  local max_download_retries=5
-  local download_retry_count=0
-  local download_success=false
-  
+  local max_retries=5
+  local count=0
+  local success=false
   mkdir -p "$target_dir"
-  
-  while [ $download_retry_count -lt $max_download_retries ] && [ "$download_success" = false ]; do
-    echo "Processing Model ID $model_version_id..."
 
-    # Metadata
+  while [ $count -lt $max_retries ] && [ "$success" = false ]; do
+    # Try Metadata API
     local api_response
     set +e 
-    # ADDED -s
     api_response=$(curl -s -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/v1/model-versions/$model_version_id")
     set -e
     
@@ -97,43 +96,40 @@ download_civit_model() {
           
           if [ -f "$target_dir/$filename" ]; then
              echo "File $filename exists. Skipping."
-             download_success=true
+             success=true
           else
              echo "Downloading $filename..."
-             # ADDED -s
              if curl -sL -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" -o "$target_dir/$filename" "$download_url"; then
-               download_success=true
+               success=true
              fi
           fi
       fi
     fi
 
-    # Fallback
-    if [ "$download_success" = false ]; then
+    # Fallback Direct Download
+    if [ "$success" = false ]; then
        echo "Attempting Direct Download for ID $model_version_id..."
        pushd "$target_dir" > /dev/null
        set +e
-       # ADDED -s
        if curl -sLJ -O -A "$USER_AGENT" -H "Authorization: Bearer $CIVITAI_TOKEN" "https://civitai.com/api/download/models/$model_version_id"; then
-         download_success=true
+         success=true
        fi
        set -e
        popd > /dev/null
     fi
 
-    if [ "$download_success" = true ]; then
+    if [ "$success" = true ]; then
        local downloaded_file=$(ls -t "$target_dir" | head -n1)
-       # Validation
        if file "$target_dir/$downloaded_file" | grep -q "HTML"; then
           rm -f "$target_dir/$downloaded_file"
-          download_success=false
+          success=false
           sleep 5
        else
           echo "SUCCESS: $downloaded_file"
           return 0
        fi
     fi
-    download_retry_count=$((download_retry_count + 1))
+    count=$((count + 1))
   done
   return 1 
 }
@@ -142,14 +138,11 @@ ensure_civitai_asset_installed() {
   if download_civit_model "$1" "$2"; then return 0; else return 0; fi
 }
 
-# ====================================================================================
-#  EXECUTION
-# ====================================================================================
-
+# --- EXECUTION ---
 echo "--- 1. INSTALLING CONFIG & EXTENSIONS ---"
 download_file_with_retries "https://raw.githubusercontent.com/tamnhucanh/vast-provisioning-scripts/refs/heads/main/ui-config.json" "$APP_DIR/ui-config.json" || true
 
-# FIXED: Removed sd-civitai-browser-plus to prevent crash
+# FIXED: Removed sd-civitai-browser-plus (Crash Cause)
 install_extension "https://github.com/Mikubill/sd-webui-controlnet.git" 
 install_extension "https://github.com/camenduru/sd-webui-additional-networks.git" 
 install_extension "https://github.com/AlUlkesh/stable-diffusion-webui-images-browser.git" 
@@ -164,8 +157,7 @@ download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/re
 download_file_with_retries "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.pth" "$EXT_DIR/sd-webui-controlnet/models/control_v11p_sd15_openpose.pth" || true
 
 # VAE
-mkdir -p "$STORAGE_DIR/models/VAE"
-download_file_with_retries "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors" "$STORAGE_DIR/models/VAE/sdxl_vae.safetensors" || true
+download_file_with_retries "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors" "$VAE_DIR/sdxl_vae.safetensors" || true
 
 # Base Models & LoRAs
 ensure_civitai_asset_installed 1166878 "$MODEL_DIR" 
